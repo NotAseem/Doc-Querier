@@ -7,3 +7,4 @@ streamlit
 langchain-chroma 
 langchain-ollama
 pypdf2
+uuid
