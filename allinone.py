@@ -10,6 +10,7 @@ import os
 import shutil
 import argparse
 import uuid
+from cache_manager import get_cached_response, cache_response, get_similar_question
 
 # Constants
 CHROMA_PATH = "chroma"
@@ -76,23 +77,47 @@ def add_to_chroma(chunks, filename):
 
 def query_rag(query_text: str, db):
     """Query the RAG system and return the response."""
-    results = db.similarity_search_with_score(query_text, k=5)
+    # Check cache first
+    cached_response = get_cached_response(query_text)
+    if cached_response:
+        yield cached_response
+        return
+
+    # Check for similar questions
+    similar_q = get_similar_question(query_text)
+    if similar_q:
+        similar_question, answer = similar_q
+        st.info(f"Found similar question: '{similar_question}'")
+        yield answer
+        return
+
+    # If not in cache, proceed with normal RAG
+    results = db.similarity_search_with_score(query_text, k=2)  # Further reduce chunks
 
     # Create context from retrieved documents
     context_text = " ".join([doc.page_content for doc, _score in results])
     prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
     prompt = prompt_template.format(context=context_text, question=query_text)
 
-    # Query the model with streaming
-    model = ChatOllama(model="llama3.2:3b", streaming=True)
+    # Use a faster model configuration with streaming
+    model = ChatOllama(
+        model="llama3.2:3b",  # Back to the faster 3B model
+        temperature=0.1,      # Lower temperature for faster responses
+        num_ctx=1024,         # Smaller context window
+        num_thread=5,         # Utilize more CPU threads
+        stop=["Human:", "Assistant:"],  # Add stop tokens for faster completion
+        streaming=True        # Enable streaming
+    )
+    
+    # Stream the response and cache it
     response_text = ""
     for chunk in model.stream(prompt):
         if hasattr(chunk, 'content') and chunk.content:
             response_text += chunk.content
-            yield chunk.content, None  # Yield each chunk as it's generated
-
-    sources = [doc.metadata.get("id", None) for doc, _score in results]
-    yield None, sources  # Yield sources at the end
+            yield chunk.content
+    
+    # Cache the complete response
+    cache_response(query_text, response_text)
 
 # def clear_database():
 #     """Clear the Chroma database."""
@@ -181,17 +206,14 @@ def main():
         query = st.text_input("Enter your query:")
         if query:
             with st.spinner("🔍 Searching through documents..."):
-                response_stream = query_rag(query, db)
-                
                 # Create an empty container for the response
                 response_container = st.empty()
                 full_response = ""
                 
                 # Stream the response
-                for chunk, sources in response_stream:
-                    if chunk is not None:
-                        full_response += chunk
-                        response_container.markdown(full_response)
+                for chunk in query_rag(query, db):
+                    full_response += chunk
+                    response_container.markdown(full_response)
     else:
         st.info("Upload a PDF to enable querying.")
 
